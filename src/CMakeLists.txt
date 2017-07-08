@@ -1,6 +1,12 @@
 project(OpenCamLib)
 
-cmake_minimum_required(VERSION 2.4)
+if(WIN32)
+  #Using WINDOWS_EXPORT_ALL_SYMBOLS added in 3.4
+  cmake_minimum_required(VERSION 3.4)
+else()
+  cmake_minimum_required(VERSION 2.6)
+endif()
+
 #set( CMAKE_SOURCE_DIR ${CMAKE_SOURCE_DIR} )
 
 if(COMMAND cmake_policy)
@@ -17,6 +23,19 @@ option(BUILD_PY_LIB
 option(BUILD_DOC
   "Build/install the ocl documentation? " ON)
 
+if (UNIX AND NOT APPLE)
+  option(BUILD_DEB "Build Debian package" ON)
+else()
+  option(BUILD_DEB "Build Debian package" OFF)
+endif(UNIX AND NOT APPLE)
+
+set(PYTHON_SITE_PREFIX_DEFAULT "")
+if(WIN32)
+  set(PYTHON_SITE_PREFIX_DEFAULT bin)
+endif(WIN32)
+set(PYTHON_SITE_INSTALL_PREFIX ${PYTHON_SITE_PREFIX_DEFAULT}
+  CACHE PATH "Relative to install prefix. Added to default site-packages path")
+ 
 option(USE_OPENMP
     "Use OpenMP for parallel computation" ON)
 
@@ -39,7 +58,8 @@ include(gcc_version.cmake)
 # Figure out how to build and where to install the Python modules
 #
 
-find_program(PYTHON_EXECUTABLE NAMES python2)
+set(Python_ADDITIONAL_VERSIONS "2.7")
+find_package(PythonInterp REQUIRED)
 
 if (APPLE)
   # Ask Python to tell us it's include directory, if nobody else has
@@ -79,19 +99,29 @@ if (APPLE)
   endif(NOT DEFINED PYTHON_LIBRARY)
 endif (APPLE)
 
+# Ubuntu: ${PYTHON_SITE_INSTALL_PREFIX}/lib/python2.7/dist-packages
+# macOS: ${PYTHON_SITE_INSTALL_PREFIX}/lib/python2.7/site-packages
+# Windows: ${PYTHON_SITE_INSTALL_PREFIX}/Lib/site-packages
 execute_process(
-  COMMAND ${PYTHON_EXECUTABLE} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(0,0,\"/usr/local\")"
+  COMMAND ${PYTHON_EXECUTABLE} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(False,False,'${PYTHON_SITE_INSTALL_PREFIX}')"
   OUTPUT_VARIABLE Python_site_packages
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  ) # on Ubuntu 11.10 this outputs: /usr/local/lib/python2.7/dist-packages
+)
 
 execute_process(
-  COMMAND ${PYTHON_EXECUTABLE} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(plat_specific=1,standard_lib=0,prefix=\"/usr/local\")"
+  COMMAND ${PYTHON_EXECUTABLE} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(plat_specific=True,standard_lib=False,prefix='${PYTHON_SITE_INSTALL_PREFIX}')"
   OUTPUT_VARIABLE Python_arch_packages
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
+)
+file(TO_CMAKE_PATH ${Python_site_packages} Python_site_packages)
+file(TO_CMAKE_PATH ${Python_arch_packages} Python_arch_packages)
 
-find_package (PythonLibs 2 REQUIRED)
+if(NOT DEFINED PYTHON_VERSION_STRING)
+    find_package(PythonLibs 2 REQUIRED)
+else()
+    find_package(PythonLibs ${PYTHON_VERSION_STRING} EXACT)
+endif(NOT DEFINED PYTHON_VERSION_STRING)
+
 include_directories(${PYTHON_INCLUDE_DIRS} )
 
 #
@@ -296,11 +326,6 @@ include_directories( ${OpenCamLib_SOURCE_DIR}/dropcutter )
 include_directories( ${OpenCamLib_SOURCE_DIR}/common )
 include_directories( ${OpenCamLib_SOURCE_DIR} )
 
-# strip away /usr/local/  because that is what CMAKE_INSTALL_PREFIX is set to
-# also, since there is no leading "/", it makes ${Python_site_packages} a relative path.
-STRING(REGEX REPLACE "/usr/local/(.*)$" "\\1" Python_site_packages "${Python_site_packages}" )
-STRING(REGEX REPLACE "/usr/local/(.*)$" "\\1" Python_arch_packages "${Python_arch_packages}" )
-
 message(STATUS "CMAKE_INSTALL_PREFIX is : " ${CMAKE_INSTALL_PREFIX})
 message(STATUS "Python modules will be installed to: " ${Python_site_packages})
 message(STATUS "Python libraries will be installed to: " ${Python_arch_packages})
@@ -325,7 +350,13 @@ if (BUILD_PY_LIB)
   set_target_properties(ocl PROPERTIES PREFIX "") 
   if (NOT APPLE)
     set_target_properties(ocl PROPERTIES VERSION ${MY_VERSION}) 
-  endif (NOT APPLE)   
+  endif (NOT APPLE)
+  
+  if(WIN32)
+    set_target_properties(ocl PROPERTIES SUFFIX ".pyd")
+    set_target_properties(ocl PROPERTIES DEBUG_OUTPUT_NAME ocl_d)
+    set_target_properties(ocl PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+  endif(WIN32)
 
   install(
     TARGETS ocl
@@ -352,14 +383,25 @@ if (BUILD_CXX_LIB)
     ${OCL_COMMON_SRC}
     )
   set_target_properties(libocl PROPERTIES PREFIX "") 
-  set_target_properties(libocl PROPERTIES VERSION ${MY_VERSION}) 
-  install(
-    TARGETS libocl
-    LIBRARY 
-    DESTINATION lib/opencamlib
-    ARCHIVE DESTINATION lib/opencamlib
-    PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+  set_target_properties(libocl PROPERTIES VERSION ${MY_VERSION})
+  
+  if(WIN32)
+    set_target_properties(libocl PROPERTIES DEBUG_OUTPUT_NAME libocl_d)
+    set_target_properties(libocl PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+    
+    install(
+      TARGETS libocl
+      RUNTIME DESTINATION bin
+      ARCHIVE DESTINATION lib
     )
+  else()
+    install(
+      TARGETS libocl
+      LIBRARY DESTINATION lib/opencamlib
+      ARCHIVE DESTINATION lib/opencamlib
+      PERMISSIONS OWNER_READ OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    )
+  endif(WIN32)
 
   # this installs the c++ include headers
   install(
@@ -477,33 +519,30 @@ if (BUILD_DOC)
   endif(DOXYGEN_FOUND)
 endif (BUILD_DOC)
 
-include(${CMAKE_SOURCE_DIR}/deb/package_details.cmake)
+if (BUILD_DEB)
+  include(${CMAKE_SOURCE_DIR}/deb/package_details.cmake)
 
-# "make spackage"
-add_custom_target(spackage 
-  ${CMAKE_COMMAND} 
-  -D SRC_DIR:STRING=${CMAKE_SOURCE_DIR} 
-  -D MY_VERSION:STRING=${MY_VERSION} 
-  -C ${CMAKE_SOURCE_DIR}/deb/package_details.cmake
-  -P ${CMAKE_CURRENT_SOURCE_DIR}/deb/DebSourcePPA.cmake 
-  ) 
-#add_custom_target(spackage-oneiric
-#              ${CMAKE_COMMAND} 
-#              -D SRC_DIR:STRING=${CMAKE_SOURCE_DIR} 
-#              -D MY_VERSION:STRING=${MY_VERSION} 
-#              -D MY_DISTRIBUTION_RELEASES:STRING="oneiric"
-#              -C ${CMAKE_SOURCE_DIR}/package_details.cmake
-#              -P ${CMAKE_CURRENT_SOURCE_DIR}/deb/DebSourcePPA.cmake 
-#            )
+  # "make spackage"
+  add_custom_target(spackage 
+    ${CMAKE_COMMAND} 
+    -D SRC_DIR:STRING=${CMAKE_SOURCE_DIR} 
+    -D MY_VERSION:STRING=${MY_VERSION} 
+    -C ${CMAKE_SOURCE_DIR}/deb/package_details.cmake
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/deb/DebSourcePPA.cmake 
+  )
+endif(BUILD_DEB)
 
 message(STATUS "type:")
 message(STATUS " 'make' for a normal build")
 message(STATUS " 'make -j8' to build faster (if you have many cpus)")
 message(STATUS " 'make install' to install")
-message(STATUS " 'make package' to build a binary deb-packate")
-message(STATUS " 'make spackage' to build debian source-packages")
 #message(STATUS " 'make spackage-oneiric' to build a debian source-package only for oneiric")
 message(STATUS " 'make test' to run the tests")
 
-# "make package"
-include(CPack) # this should be last
+if (BUILD_DEB)
+    message(STATUS " 'make package' to build a binary deb-packate")
+    message(STATUS " 'make spackage' to build debian source-packages")
+    
+    # "make package"
+    include(CPack) # this should be last
+endif(BUILD_DEB)
